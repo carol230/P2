@@ -220,11 +220,18 @@ class EntornoGrid:
         pos = tuple(self.agent)
         terminado = False
 
+        # if pos in self.frutas:
+        #     recompensa = 1.0
+        #     self.frutas.remove(pos)
+        #     if not self.frutas:  # Si no quedan frutas, termina el episodio con éxito
+        #         terminado = True
         if pos in self.frutas:
-            recompensa = 1.0
             self.frutas.remove(pos)
-            if not self.frutas:  # Si no quedan frutas, termina el episodio con éxito
+            if not self.frutas:  # ¡Es la última fruta!
+                recompensa = 20.0  # >> RECOMPENSA FINAL MUCHO MAYOR <<
                 terminado = True
+            else:
+                recompensa = 1.0 # Recompensa estándar por una fruta intermedia
         elif pos in self.venenos:
             recompensa = -1.0
             terminado = True

@@ -99,39 +99,55 @@ class AgentePPO:
             return accion.item(), dist.log_prob(accion), value
 
     def optimizar(self):
+        """
+        Realiza la actualización de PPO. Es el núcleo del algoritmo.
+        (Versión corregida)
+        """
         if not self.memory: return
+
+        # 1. Extraer los datos de la memoria
         states, actions, old_log_probs, rewards, dones, values = zip(*self.memory)
-        
+
+        # 2. Calcular las recompensas descontadas ("returns")
+        # Se calcula hacia atrás desde el final del rollout
         returns = []
         discounted_reward = 0
-        # Empezamos desde el final para el cálculo de retornos
-        for r, d, v in zip(reversed(rewards), reversed(dones), reversed(values)):
-            if d:
-                discounted_reward = 0 # El retorno es 0 si es el estado final
-            discounted_reward = r + self.gamma * discounted_reward
+        for r, d in zip(reversed(rewards), reversed(dones)):
+            if d: # Si el estado es terminal, el retorno futuro es 0
+                discounted_reward = 0
+            discounted_reward = r + (self.gamma * discounted_reward)
             returns.insert(0, discounted_reward)
 
-        returns_t = torch.tensor(returns, dtype=torch.float32, device=self.device).detach()
+        # 3. Convertir las listas a tensores para el cálculo
+        returns_t = torch.tensor(returns, dtype=torch.float32, device=self.device)
         states_t = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
         actions_t = torch.tensor(actions, dtype=torch.int64, device=self.device)
-        old_log_probs_t = torch.cat([p.unsqueeze(0) for p in old_log_probs]).detach()
-        values_t = torch.cat(values).detach()
-
-        advantages = returns_t - values_t.squeeze()
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
+        # Convertir la tupla de tensores a un solo tensor
+        old_log_probs_t = torch.stack(list(old_log_probs)).detach()
+        values_t = torch.cat(values).squeeze().detach()
+
+        # 4. Calcular ventajas (advantages) y normalizarlas
+        advantages = returns_t - values_t
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # 5. Evaluar las acciones con la política actual para obtener el ratio
         new_policy, new_values = self.network(states_t)
         dist = torch.distributions.Categorical(new_policy)
         new_log_probs = dist.log_prob(actions_t)
         
-        ratio = torch.exp(new_log_probs - old_log_probs)
-        
+        # CORRECCIÓN DEL ERROR: Usar old_log_probs_t (el tensor) en lugar de old_log_probs (la tupla)
+        ratio = torch.exp(new_log_probs - old_log_probs_t)
+
+        # 6. Calcular la pérdida de PPO (Actor y Crítico)
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
         actor_loss = -torch.min(surr1, surr2).mean()
         critic_loss = nn.functional.mse_loss(new_values.squeeze(), returns_t)
+
         loss = actor_loss + 0.5 * critic_loss
-        
+
+        # 7. Realizar la optimización
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)

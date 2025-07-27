@@ -53,6 +53,13 @@ TARGET_UPDATE = 15  # Actualizar la red objetivo cada 15 episodios
 MODEL_PATH = "modelo_dqn.pth"
 MAX_STEPS_PER_EPISODE = 100 # Evita que el agente se quede atascado
 
+# Recompensas (se pueden ajustar fácilmente o vía CLI)
+REWARD_STEP = -0.001
+REWARD_WALL = -0.5
+REWARD_FRUIT = 1.0
+REWARD_LAST_FRUIT = 10.0
+REWARD_POISON = -5.0
+
 # --- Colores y Fuentes ---
 COLOR_FONDO = (25, 25, 25)
 COLOR_LINEAS = (40, 40, 40)
@@ -138,7 +145,9 @@ class AgenteDQN:
 
         q_vals = self.policy_net(estados_t).gather(1, acciones_t)
         with torch.no_grad():
-            next_q_vals = self.target_net(sig_estados_t).max(1)[0].unsqueeze(1)
+            # Double DQN: la acción se elige con policy_net pero se evalúa con target_net
+            next_actions = self.policy_net(sig_estados_t).argmax(1).unsqueeze(1)
+            next_q_vals = self.target_net(sig_estados_t).gather(1, next_actions)
             expected_q = recompensas_t + (GAMMA * next_q_vals * (1 - dones_t))
 
         loss = nn.functional.mse_loss(q_vals, expected_q)
@@ -210,11 +219,11 @@ class EntornoGrid:
         nx, ny = self.agent[0] + dx, self.agent[1] + dy
 
         # Penalización por moverse
-        recompensa = -0.001
+        recompensa = REWARD_STEP
 
         # Comprueba colisiones con paredes o límites
         if not (0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE and (nx, ny) not in self.paredes):
-            recompensa = -0.5 # Penalización por chocar
+            recompensa = REWARD_WALL  # Penalización por chocar
         else:
             self.agent = [nx, ny]
 
@@ -228,14 +237,12 @@ class EntornoGrid:
         #         terminado = True
         if pos in self.frutas:
             self.frutas.remove(pos)
-            recompensa = 2.0  # Recompensa por recoger una fruta
+            recompensa = REWARD_FRUIT  # Recompensa por recoger una fruta
             if not self.frutas:  # ¡Es la última fruta!
-                recompensa = 10.0  # >> RECOMPENSA FINAL MUCHO MAYOR <<
+                recompensa = REWARD_LAST_FRUIT  # Recompensa final mayor
                 terminado = True
-            else:
-                recompensa = 1.0 # Recompensa estándar por una fruta intermedia
         elif pos in self.venenos:
-            recompensa = -5.0
+            recompensa = REWARD_POISON
             terminado = True
         
         # El episodio también termina si excede el número de pasos
@@ -486,11 +493,33 @@ if __name__ == "__main__":
                         help="Número de episodios para el entrenamiento headless")
     parser.add_argument("--fps", type=int, default=10,
                         help="Frames por segundo en modo visual")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help="Tamaño del batch para el entrenamiento")
+    parser.add_argument("--epsilon-decay", type=float, default=EPSILON_DECAY,
+                        help="Factor de decaimiento de epsilon")
+    parser.add_argument("--reward-step", type=float, default=REWARD_STEP,
+                        help="Recompensa por cada paso")
+    parser.add_argument("--reward-wall", type=float, default=REWARD_WALL,
+                        help="Penalización por chocar")
+    parser.add_argument("--reward-fruit", type=float, default=REWARD_FRUIT,
+                        help="Recompensa por fruta")
+    parser.add_argument("--reward-last-fruit", type=float, default=REWARD_LAST_FRUIT,
+                        help="Recompensa por la última fruta")
+    parser.add_argument("--reward-poison", type=float, default=REWARD_POISON,
+                        help="Penalización por veneno")
 
     args = parser.parse_args()
+
+    # Actualiza hiperparámetros desde la línea de comandos
+    BATCH_SIZE = args.batch_size
+    EPSILON_DECAY = args.epsilon_decay
+    REWARD_STEP = args.reward_step
+    REWARD_WALL = args.reward_wall
+    REWARD_FRUIT = args.reward_fruit
+    REWARD_LAST_FRUIT = args.reward_last_fruit
+    REWARD_POISON = args.reward_poison
 
     if args.headless:
         entrenamiento_headless(episodios=args.episodios)
     else:
-        # main_visual acepta opcionalmente la velocidad deseada
-        main(fps=args.fps)             # <- cambia tu 'main' original a 'main(fps=10)'
+        main(fps=args.fps)

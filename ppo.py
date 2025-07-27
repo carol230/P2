@@ -1,8 +1,8 @@
-# PACMAN PPO - CASA ABIERTA (VERSIÓN CON PPO)
+# PACMAN PPO - VERSIÓN FINAL
 # --------------------------------------------------------
 # Juego educativo: GridWorld 7x7, Agente RL tipo Pac-Man (Proximal Policy Optimization)
-# El agente aprende a recolectar frutas y evitar venenos de forma fluida y visible.
-# PPO ofrece un aprendizaje más rápido y estable que DQN.
+# El agente aprende a resolver un laberinto con una estructura de paredes fija pero
+# con frutas y venenos que cambian de lugar en cada partida.
 #
 # REQUISITOS:
 # - pygame
@@ -34,8 +34,8 @@ LEARNING_RATE = 0.0003
 GAMMA = 0.99
 CLIP_EPSILON = 0.2
 UPDATE_TIMESTEPS = 2048 # Actualizar la política cada N pasos
-MODEL_PATH = "modelo_ppo.pth"
-MAX_STEPS_PER_EPISODE = 150 # Evita que el agente se quede atascado
+MODEL_PATH = "modelo_ppo_final.pth"
+MAX_STEPS_PER_EPISODE = 150
 
 # Recompensas
 REWARD_STEP = -0.01
@@ -99,55 +99,38 @@ class AgentePPO:
             return accion.item(), dist.log_prob(accion), value
 
     def optimizar(self):
-        """
-        Realiza la actualización de PPO. Es el núcleo del algoritmo.
-        (Versión corregida)
-        """
         if not self.memory: return
-
-        # 1. Extraer los datos de la memoria
         states, actions, old_log_probs, rewards, dones, values = zip(*self.memory)
-
-        # 2. Calcular las recompensas descontadas ("returns")
-        # Se calcula hacia atrás desde el final del rollout
+        
         returns = []
         discounted_reward = 0
         for r, d in zip(reversed(rewards), reversed(dones)):
-            if d: # Si el estado es terminal, el retorno futuro es 0
+            if d:
                 discounted_reward = 0
             discounted_reward = r + (self.gamma * discounted_reward)
             returns.insert(0, discounted_reward)
 
-        # 3. Convertir las listas a tensores para el cálculo
         returns_t = torch.tensor(returns, dtype=torch.float32, device=self.device)
         states_t = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
         actions_t = torch.tensor(actions, dtype=torch.int64, device=self.device)
-        
-        # Convertir la tupla de tensores a un solo tensor
         old_log_probs_t = torch.stack(list(old_log_probs)).detach()
         values_t = torch.cat(values).squeeze().detach()
 
-        # 4. Calcular ventajas (advantages) y normalizarlas
         advantages = returns_t - values_t
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        # 5. Evaluar las acciones con la política actual para obtener el ratio
+        
         new_policy, new_values = self.network(states_t)
         dist = torch.distributions.Categorical(new_policy)
         new_log_probs = dist.log_prob(actions_t)
         
-        # CORRECCIÓN DEL ERROR: Usar old_log_probs_t (el tensor) en lugar de old_log_probs (la tupla)
         ratio = torch.exp(new_log_probs - old_log_probs_t)
-
-        # 6. Calcular la pérdida de PPO (Actor y Crítico)
+        
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
         actor_loss = -torch.min(surr1, surr2).mean()
         critic_loss = nn.functional.mse_loss(new_values.squeeze(), returns_t)
-
         loss = actor_loss + 0.5 * critic_loss
-
-        # 7. Realizar la optimización
+        
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
@@ -232,31 +215,41 @@ def cargar_imagen(nombre, fallback_color):
         s = pygame.Surface((CELL_SIZE, CELL_SIZE)); s.fill(fallback_color)
         return s
 
-def generar_entorno_aleatorio(entorno, num_frutas, num_venenos, num_paredes):
-    entorno.reset_board()
-    celdas_disponibles = [(x, y) for x in range(GRID_SIZE) for y in range(GRID_SIZE)]
+def definir_paredes_fijas(entorno):
+    """Establece la estructura de paredes predeterminada del juego."""
+    entorno.paredes = {
+        (1,1), (1,2), (1,3), (1,4), (1,5), 
+        (5,1), (5,2), (5,3), (5,4), (5,5),
+        (3,1), (3,5)
+    }
+
+def generar_objetivos_aleatorios(entorno, num_frutas, num_venenos):
+    """Limpia frutas/venenos y los genera en posiciones válidas (no en paredes)."""
+    entorno.frutas.clear()
+    entorno.venenos.clear()
+    celdas_disponibles = []
+    for x in range(GRID_SIZE):
+        for y in range(GRID_SIZE):
+            if (x, y) not in entorno.paredes:
+                celdas_disponibles.append((x, y))
     random.shuffle(celdas_disponibles)
-    if not celdas_disponibles: return
-    pos_agente = celdas_disponibles.pop()
-    entorno.agent = [pos_agente[0], pos_agente[1]]
-    for _ in range(num_paredes):
-        if celdas_disponibles: entorno.paredes.add(celdas_disponibles.pop())
     for _ in range(num_frutas):
         if celdas_disponibles: entorno.frutas.add(celdas_disponibles.pop())
     for _ in range(num_venenos):
         if celdas_disponibles: entorno.venenos.add(celdas_disponibles.pop())
 
 # --- Entrenamiento Headless ---
-def entrenamiento_headless(episodios=10000, num_frutas=4, num_venenos=3, num_paredes=6, mostrar_cada=50):
+def entrenamiento_headless(episodios=50000, num_frutas=4, num_venenos=3, mostrar_cada=50):
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     pygame.init()
     
     entorno = EntornoGrid()
+    definir_paredes_fijas(entorno)
     agente = AgentePPO(state_shape=STATE_SHAPE, num_actions=ACTIONS)
     total_pasos = 0
     
     for ep in range(1, episodios + 1):
-        generar_entorno_aleatorio(entorno, num_frutas, num_venenos, num_paredes)
+        generar_objetivos_aleatorios(entorno, num_frutas, num_venenos)
         estado = entorno.reset_agent()
         terminado, score = False, 0.0
         
@@ -281,7 +274,7 @@ def entrenamiento_headless(episodios=10000, num_frutas=4, num_venenos=3, num_par
 def main(fps=10):
     pygame.init()
     pantalla = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Pacman RL - PPO Interactivo")
+    pygame.display.set_caption("Pacman RL - PPO Final")
     clock = pygame.time.Clock()
 
     img_agente = cargar_imagen('agente.png', (60, 100, 255))
@@ -291,6 +284,7 @@ def main(fps=10):
     font = pygame.font.SysFont("Consolas", 24, bold=True)
 
     entorno = EntornoGrid()
+    definir_paredes_fijas(entorno)
     agente = AgentePPO(state_shape=STATE_SHAPE, num_actions=ACTIONS)
     
     modo = "SETUP"
@@ -306,58 +300,68 @@ def main(fps=10):
             if evento.type == pygame.QUIT or (evento.type == pygame.KEYDOWN and evento.key == pygame.K_q):
                 running = False
             if evento.type == pygame.KEYDOWN:
-                if evento.key == pygame.K_s: modo = "SETUP"; entorno.restore(tablero_inicial)
+                if evento.key == pygame.K_s:
+                    modo = "SETUP"
+                    # Al entrar a setup, restaura el mapa base (solo paredes)
+                    entorno.restore(tablero_inicial)
                 if evento.key == pygame.K_t:
                     modo = "TRAINING" if modo != "TRAINING" else "SETUP"
-                    entorno.restore(tablero_inicial); entorno.reset_agent()
+                    if modo == "TRAINING":
+                        generar_objetivos_aleatorios(entorno, 4, 3) # Genera un mapa para entrenar
+                        entorno.reset_agent()
                 if evento.key == pygame.K_p:
-                    modo = "PLAYING"; entorno.restore(tablero_inicial); entorno.reset_agent()
+                    modo = "PLAYING"
+                    entorno.reset_agent()
 
                 if modo == "SETUP":
                     if evento.key == pygame.K_UP: cursor[1] = max(0, cursor[1] - 1)
                     elif evento.key == pygame.K_DOWN: cursor[1] = min(GRID_SIZE - 1, cursor[1] + 1)
                     elif evento.key == pygame.K_LEFT: cursor[0] = max(0, cursor[0] - 1)
                     elif evento.key == pygame.K_RIGHT: cursor[0] = min(GRID_SIZE - 1, cursor[0] + 1)
-                    
                     pos = tuple(cursor)
-                    if evento.key == pygame.K_f: entorno.frutas.symmetric_difference_update({pos}); entorno.venenos.discard(pos); entorno.paredes.discard(pos)
-                    elif evento.key == pygame.K_v: entorno.venenos.symmetric_difference_update({pos}); entorno.frutas.discard(pos); entorno.paredes.discard(pos)
-                    elif evento.key == pygame.K_w: entorno.paredes.symmetric_difference_update({pos}); entorno.frutas.discard(pos); entorno.venenos.discard(pos)
-                    elif evento.key == pygame.K_c: entorno.reset_board()
-                    tablero_inicial = entorno.snapshot()
+                    if evento.key == pygame.K_f: entorno.frutas.symmetric_difference_update({pos}); entorno.venenos.discard(pos)
+                    elif evento.key == pygame.K_v: entorno.venenos.symmetric_difference_update({pos}); entorno.frutas.discard(pos)
+                    elif evento.key == pygame.K_c: entorno.frutas.clear(); entorno.venenos.clear()
 
-        if modo in ["TRAINING", "PLAYING"]:
+        if modo == "TRAINING":
             estado_actual = entorno.get_state()
-            es_greedy = (modo == "PLAYING")
-            accion, log_prob, valor = agente.elegir_accion(estado_actual, greedy=es_greedy)
+            accion, log_prob, valor = agente.elegir_accion(estado_actual)
             sig_estado, recompensa, terminado = entorno.paso(accion)
             puntuacion_total += recompensa
-            
-            if modo == "TRAINING":
-                pasos_desde_update += 1
-                agente.almacenar(estado_actual, accion, log_prob, recompensa, terminado, valor)
+            pasos_desde_update += 1
+            agente.almacenar(estado_actual, accion, log_prob, recompensa, terminado, valor)
             
             if terminado:
                 print(f"Episodio {episodio_num} terminado. Puntuación: {puntuacion_total:.2f}")
-                entorno.restore(tablero_inicial); entorno.reset_agent()
+                generar_objetivos_aleatorios(entorno, 4, 3)
+                entorno.reset_agent()
                 puntuacion_total = 0
                 episodio_num += 1
                 
-            if modo == "TRAINING" and pasos_desde_update >= UPDATE_TIMESTEPS:
+            if pasos_desde_update >= UPDATE_TIMESTEPS:
                 print(f"--- Realizando actualización de PPO ({pasos_desde_update} pasos) ---")
                 agente.optimizar()
                 agente.limpiar_memoria()
                 agente.save()
                 pasos_desde_update = 0
 
+        elif modo == "PLAYING":
+            estado_actual = entorno.get_state()
+            accion, _, _ = agente.elegir_accion(estado_actual, greedy=True)
+            _, _, terminado = entorno.paso(accion)
+            if terminado:
+                print("Episodio de juego terminado.")
+                entorno.restore(tablero_inicial) # Restaura a solo paredes
+                modo = "SETUP"
+
         pantalla.fill(COLOR_FONDO)
         for x in range(GRID_SIZE):
             for y in range(GRID_SIZE):
                 pygame.draw.rect(pantalla, COLOR_LINEAS, (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE), 1)
 
+        for x, y in entorno.paredes: pantalla.blit(img_pared,  (x * CELL_SIZE, y * CELL_SIZE))
         for x, y in entorno.frutas:  pantalla.blit(img_fruta,  (x * CELL_SIZE, y * CELL_SIZE))
         for x, y in entorno.venenos: pantalla.blit(img_veneno, (x * CELL_SIZE, y * CELL_SIZE))
-        for x, y in entorno.paredes: pantalla.blit(img_pared,  (x * CELL_SIZE, y * CELL_SIZE))
         
         if modo != "SETUP":
             pantalla.blit(img_agente, (entorno.agent[0] * CELL_SIZE, entorno.agent[1] * CELL_SIZE))
@@ -383,7 +387,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Pac-Man RL (PPO) – Modo visual o headless")
     parser.add_argument("--headless", action="store_true", help="Entrena sin interfaz gráfica")
-    parser.add_argument("--episodios", type=int, default=10000, help="Número de episodios para el entrenamiento headless")
+    parser.add_argument("--episodios", type=int, default=50000, help="Número de episodios para el entrenamiento headless")
     parser.add_argument("--fps", type=int, default=15, help="Frames por segundo en modo visual")
     args = parser.parse_args()
 

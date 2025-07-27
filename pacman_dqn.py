@@ -210,11 +210,11 @@ class EntornoGrid:
         nx, ny = self.agent[0] + dx, self.agent[1] + dy
 
         # Penalización por moverse
-        recompensa = -0.01
+        recompensa = -0.001
 
         # Comprueba colisiones con paredes o límites
         if not (0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE and (nx, ny) not in self.paredes):
-            recompensa = -0.2 # Penalización por chocar
+            recompensa = -0.5 # Penalización por chocar
         else:
             self.agent = [nx, ny]
 
@@ -228,13 +228,14 @@ class EntornoGrid:
         #         terminado = True
         if pos in self.frutas:
             self.frutas.remove(pos)
+            recompensa = 2.0  # Recompensa por recoger una fruta
             if not self.frutas:  # ¡Es la última fruta!
-                recompensa = 20.0  # >> RECOMPENSA FINAL MUCHO MAYOR <<
+                recompensa = 10.0  # >> RECOMPENSA FINAL MUCHO MAYOR <<
                 terminado = True
             else:
                 recompensa = 1.0 # Recompensa estándar por una fruta intermedia
         elif pos in self.venenos:
-            recompensa = -1.0
+            recompensa = -5.0
             terminado = True
         
         # El episodio también termina si excede el número de pasos
@@ -313,6 +314,7 @@ def entrenamiento_headless(episodios=10000,
 
     entorno = EntornoGrid()
     agente  = AgenteDQN(state_shape=STATE_SHAPE, num_actions=ACTIONS)
+    agente.epsilon = 1.0  # Inicia con exploración máxima
 
     for ep in range(1, episodios + 1):
         generar_entorno_aleatorio(entorno, num_frutas, num_venenos, num_paredes)
@@ -326,6 +328,8 @@ def entrenamiento_headless(episodios=10000,
 
         if ep % mostrar_cada == 0 or ep == 1:
             print(f"[Headless] Ep {ep:5d}/{episodios} | Score: {score:6.2f} | ε={agente.epsilon:.3f}")
+    agente.update_target()  # Asegura que la red objetivo esté actualizada al final
+    agente.save()  # Guarda el modelo final
 
 # --- Bucle Principal del Juego ---
 def main(fps=10):

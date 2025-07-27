@@ -92,11 +92,20 @@ class AgentePPO:
             estado_t = torch.tensor(estado, dtype=torch.float32, device=self.device).unsqueeze(0)
             policy, value = self.network(estado_t)
             dist = torch.distributions.Categorical(policy)
+            
             if greedy:
-                accion = torch.argmax(policy).item()
+                # En modo greedy, elegimos la acción con la probabilidad más alta
+                accion_tensor = torch.argmax(policy)
             else:
-                accion = dist.sample()
-            return accion.item(), dist.log_prob(accion), value
+                # En modo entrenamiento, muestreamos de la distribución
+                accion_tensor = dist.sample()
+            
+            # Calculamos la probabilidad logarítmica usando el tensor de la acción
+            log_prob = dist.log_prob(accion_tensor)
+            # Obtenemos el valor entero de la acción para retornarlo
+            accion_int = accion_tensor.item()
+            
+            return accion_int, log_prob, value
 
     def optimizar(self):
         if not self.memory: return
@@ -280,7 +289,7 @@ def main(fps=10):
     img_agente = cargar_imagen('agente.png', (60, 100, 255))
     img_fruta = cargar_imagen('fruta.png', (40, 200, 40))
     img_veneno = cargar_imagen('veneno.png', (255, 80, 80))
-    img_pared = cargar_imagen('pared.png', (100, 100, 100))
+    img_pared = cargar_imagen('pared.jpg', (100, 100, 100))
     font = pygame.font.SysFont("Consolas", 24, bold=True)
 
     entorno = EntornoGrid()

@@ -258,348 +258,235 @@ def cargar_imagen(nombre, fallback_color):
 def generar_entorno_aleatorio(entorno, num_frutas, num_venenos, num_paredes):
     """
     Limpia el entorno y lo puebla con un número específico de ítems en posiciones aleatorias.
-    Garantiza que no haya solapamientos y que el agente no empiece en una casilla ocupada.
     """
     entorno.reset_board()
+    entorno.pasos_episodio = 0 # CORRECCIÓN: Reinicia el contador de pasos
     
-    # Crea una lista de todas las celdas posibles y la desordena
     celdas_disponibles = [(x, y) for x in range(GRID_SIZE) for y in range(GRID_SIZE)]
     random.shuffle(celdas_disponibles)
     
-    # Coloca al agente en una posición aleatoria segura
+    if not celdas_disponibles: return
+
     pos_agente = celdas_disponibles.pop()
     entorno.agent = [pos_agente[0], pos_agente[1]]
     
-    # Coloca las paredes
     for _ in range(num_paredes):
         if not celdas_disponibles: break
-        pos_pared = celdas_disponibles.pop()
-        entorno.paredes.add(pos_pared)
-        
-    # Coloca las frutas
+        entorno.paredes.add(celdas_disponibles.pop())
     for _ in range(num_frutas):
         if not celdas_disponibles: break
-        pos_fruta = celdas_disponibles.pop()
-        entorno.frutas.add(pos_fruta)
-
-    # Coloca los venenos
+        entorno.frutas.add(celdas_disponibles.pop())
     for _ in range(num_venenos):
         if not celdas_disponibles: break
-        pos_veneno = celdas_disponibles.pop()
-        entorno.venenos.add(pos_veneno)
-    
-    # Actualiza el número total de frutas para la condición de victoria
-    entorno.total_frutas = len(entorno.frutas)
+        entorno.venenos.add(celdas_disponibles.pop())
 
-# --- Bucle Principal del Juego (Modificado) ---
-def main():
-    # Determinar el modo de ejecución desde los argumentos de la terminal
-    fast_mode = "--fast" in sys.argv
-    if fast_mode:
-        print("--- MODO DE ENTRENAMIENTO RÁPIDO (HEADLESS) ACTIVADO ---")
-        print("No se mostrará ninguna ventana. El progreso se verá en la consola.")
-        print("Presiona Ctrl+C para detener el entrenamiento y guardar el progreso.")
+# --- NUEVA FUNCIÓN UTILITARIA ---------------------------------
+def run_episode(entorno, agente, entrenamiento=True):
+    """
+    Ejecuta un solo episodio y devuelve la puntuación obtenida.
+    • Si 'entrenamiento' es False => no guarda transiciones ni optimiza.
+    """
+    estado = entorno.reset_agent()               # Coloca al bot
+    terminado, score = False, 0.0
 
+    while not terminado:
+        accion = agente.elegir_accion(estado, greedy=not entrenamiento)
+        sig_estado, recompensa, terminado = entorno.paso(accion)
+        score += recompensa
+
+        if entrenamiento:
+            agente.almacenar(estado, accion, recompensa, sig_estado, terminado)
+            agente.optimizar()
+
+        estado = sig_estado
+
+    return score
+
+def entrenamiento_headless(episodios=10000,
+                           num_frutas=4, num_venenos=3, num_paredes=6,
+                           mostrar_cada=100):
+
+    # Truco: desactiva la necesidad de abrir ventana
+    import os, pygame
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    pygame.init()                      # Sigue haciendo falta para que no fallen imports
+
+    entorno = EntornoGrid()
+    agente  = AgenteDQN(state_shape=STATE_SHAPE, num_actions=ACTIONS)
+
+    for ep in range(1, episodios + 1):
+        generar_entorno_aleatorio(entorno, num_frutas, num_venenos, num_paredes)
+        score = run_episode(entorno, agente, entrenamiento=True)
+
+        # Decaimiento de ε y actualización de red objetivo
+        agente.decaer_epsilon()
+        if ep % TARGET_UPDATE == 0:
+            agente.update_target()
+            agente.save()
+
+        if ep % mostrar_cada == 0 or ep == 1:
+            print(f"[Headless] Ep {ep:5d}/{episodios} | Score: {score:6.2f} | ε={agente.epsilon:.3f}")
+
+# --- Bucle Principal del Juego ---
+def main(fps=10):
     pygame.init()
+    pantalla = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("Pacman RL - DQN Interactivo")
+    clock = pygame.time.Clock()
 
-    # En modo rápido, no necesitamos crear una pantalla real, pero pygame necesita ser inicializado
-    if not fast_mode:
-        pantalla = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Pacman RL - DQN Interactivo")
-        clock = pygame.time.Clock()
-        font = pygame.font.SysFont("Consolas", 24, bold=True)
-        # Carga de recursos gráficos solo si no estamos en modo rápido
-        img_agente = cargar_imagen('agente.png', (60, 100, 255))
-        img_fruta = cargar_imagen('fruta.png', (40, 200, 40))
-        img_veneno = cargar_imagen('veneno.png', (255, 80, 80))
-        img_pared = cargar_imagen('pared.png', (100, 100, 100))
+    # Carga de recursos
+    img_agente = cargar_imagen('agente.png', (60, 100, 255))
+    img_fruta = cargar_imagen('fruta.png', (40, 200, 40))
+    img_veneno = cargar_imagen('veneno.png', (255, 80, 80))
+    img_pared = cargar_imagen('pared.jpg', (100, 100, 100)) # CORRECCIÓN: pared.png
+    font = pygame.font.SysFont("Consolas", 24, bold=True)
 
     # Inicialización de objetos
     entorno = EntornoGrid()
     agente = AgenteDQN(state_shape=STATE_SHAPE, num_actions=ACTIONS)
-
-    # En modo rápido, generamos el primer entorno aleatorio de inmediato
-    if fast_mode:
-        generar_entorno_aleatorio(entorno, num_frutas=5, num_venenos=3, num_paredes=7)
-
+    
     # Variables de estado del juego
-    modo = "TRAINING" if fast_mode else "SETUP"
+    modo = "SETUP" # Inicia en modo diseño
     cursor = [GRID_SIZE // 2, GRID_SIZE // 2]
     tablero_inicial = entorno.snapshot()
     episodio_num = 0
     puntuacion_total = 0
     running = True
 
-    try:
-        # ---- BUCLE PRINCIPAL ----
-        while running:
-            # En modo rápido, no procesamos eventos, solo entrenamos
-            if not fast_mode:
-                for evento in pygame.event.get():
-                    if evento.type == pygame.QUIT or (evento.type == pygame.KEYDOWN and evento.key == pygame.K_q):
-                        running = False
-
-                    if evento.type == pygame.KEYDOWN:
-                        # Cambiar de modo
-                        if evento.key == pygame.K_s:
-                            modo = "SETUP"
-                            entorno.restore(tablero_inicial)
-                        if evento.key == pygame.K_t:
-                            if modo != "TRAINING":
-                                modo = "TRAINING"
-                                entorno.restore(tablero_inicial)
-                                entorno.reset_agent()
-                            else:
-                                modo = "SETUP" # Pausar entrenamiento
-                        if evento.key == pygame.K_p:
-                            modo = "PLAYING"
-                            entorno.restore(tablero_inicial)
-                            entorno.reset_agent()
-
-                        # Controles del modo SETUP
-                        if modo == "SETUP":
-                            if evento.key == pygame.K_UP: cursor[1] = max(0, cursor[1] - 1)
-                            elif evento.key == pygame.K_DOWN: cursor[1] = min(GRID_SIZE - 1, cursor[1] + 1)
-                            elif evento.key == pygame.K_LEFT: cursor[0] = max(0, cursor[0] - 1)
-                            elif evento.key == pygame.K_RIGHT: cursor[0] = min(GRID_SIZE - 1, cursor[0] + 1)
-
-                            pos = tuple(cursor)
-                            if evento.key == pygame.K_f:
-                                entorno.frutas.symmetric_difference_update({pos})
-                                entorno.venenos.discard(pos); entorno.paredes.discard(pos)
-                            elif evento.key == pygame.K_v:
-                                entorno.venenos.symmetric_difference_update({pos})
-                                entorno.frutas.discard(pos); entorno.paredes.discard(pos)
-                            elif evento.key == pygame.K_w:
-                                entorno.paredes.symmetric_difference_update({pos})
-                                entorno.frutas.discard(pos); entorno.venenos.discard(pos)
-                            elif evento.key == pygame.K_c:
-                                entorno.reset_board()
-
-                            tablero_inicial = entorno.snapshot() # Guarda el diseño
-
-            # --- LÓGICA DEL JUEGO Y ENTRENAMIENTO (Funciona en ambos modos) ---
-            if modo in ["TRAINING", "PLAYING"]:
-                estado_actual = entorno.get_state()
-                es_greedy = (modo == "PLAYING")
-                accion = agente.elegir_accion(estado_actual, greedy=es_greedy)
-                sig_estado, recompensa, terminado = entorno.paso(accion)
-                puntuacion_total += recompensa
-
-                if modo == "TRAINING":
-                    agente.almacenar(estado_actual, accion, recompensa, sig_estado, terminado)
-                    agente.optimizar()
-
-                if terminado:
-                    # Siempre imprime en consola, para ver el progreso en modo rápido
-                    if (episodio_num + 1) % 10 == 0: # Imprime cada 10 episodios para no saturar
-                        print(f"Episodio {episodio_num+1} | Puntuación: {puntuacion_total:.2f} | Epsilon: {agente.epsilon:.3f}")
-                    
-                    puntuacion_total = 0
-                    episodio_num += 1
-
-                    # En modo rápido, genera un nuevo laberinto para el siguiente episodio
-                    if fast_mode:
-                        generar_entorno_aleatorio(entorno, num_frutas=5, num_venenos=3, num_paredes=7)
-                        # La llamada a reset_agent está implícita en la generación
-                    else: # En modo visual, restaura el tablero diseñado por el usuario
+    # ---- BUCLE PRINCIPAL ----
+    while running:
+        # --- 1. GESTIÓN DE EVENTOS ---
+        for evento in pygame.event.get():
+            if evento.type == pygame.QUIT or (evento.type == pygame.KEYDOWN and evento.key == pygame.K_q):
+                running = False
+            if evento.type == pygame.KEYDOWN:
+                # Cambiar de modo
+                if evento.key == pygame.K_s:
+                    modo = "SETUP"
+                    entorno.restore(tablero_inicial)
+                if evento.key == pygame.K_t:
+                    if modo != "TRAINING":
+                        modo = "TRAINING"
                         entorno.restore(tablero_inicial)
                         entorno.reset_agent()
+                    else:
+                        modo = "SETUP" # Pausar entrenamiento
+                if evento.key == pygame.K_p:
+                    modo = "PLAYING"
+                    entorno.restore(tablero_inicial)
+                    entorno.reset_agent()
 
-                    if modo == "TRAINING":
-                        agente.decaer_epsilon()
-                        if episodio_num % TARGET_UPDATE == 0:
-                            agente.update_target()
-                            # En modo rápido, guardamos más seguido por si se interrumpe
-                            if fast_mode or episodio_num % 50 == 0:
-                                agente.save()
-
-            # --- RENDERIZADO (Solo se ejecuta si no estamos en modo rápido) ---
-            if not fast_mode:
-                pantalla.fill(COLOR_FONDO)
-                for x in range(GRID_SIZE):
-                    for y in range(GRID_SIZE):
-                        pygame.draw.rect(pantalla, COLOR_LINEAS, (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE), 1)
-
-                for x, y in entorno.frutas:  pantalla.blit(img_fruta,  (x * CELL_SIZE, y * CELL_SIZE))
-                for x, y in entorno.venenos: pantalla.blit(img_veneno, (x * CELL_SIZE, y * CELL_SIZE))
-                for x, y in entorno.paredes: pantalla.blit(img_pared,  (x * CELL_SIZE, y * CELL_SIZE))
-
-                if modo != "SETUP":
-                    pantalla.blit(img_agente, (entorno.agent[0] * CELL_SIZE, entorno.agent[1] * CELL_SIZE))
-
+                # Controles del modo SETUP
                 if modo == "SETUP":
-                    pygame.draw.rect(pantalla, COLOR_CURSOR, (cursor[0] * CELL_SIZE, cursor[1] * CELL_SIZE, CELL_SIZE, CELL_SIZE), 4)
-
-                ui_y = GRID_SIZE * CELL_SIZE
-                pygame.draw.rect(pantalla, (40,40,40), (0, ui_y, SCREEN_WIDTH, 80))
-
-                modo_texto = font.render(f"MODO: {modo}", True, COLOR_INFO)
-                pantalla.blit(modo_texto, (10, ui_y + 10))
-
-                if modo == "TRAINING":
-                    eps_texto = font.render(f"Epsilon: {agente.epsilon:.2f}", True, COLOR_TEXTO)
-                    pantalla.blit(eps_texto, (200, ui_y + 10))
-
-                episodio_texto = font.render(f"Episodio: {episodio_num}", True, COLOR_TEXTO)
-                pantalla.blit(episodio_texto, (450, ui_y + 10))
-
-                controles_texto = font.render("S:Setup T:Entrenar P:Jugar Q:Salir", True, COLOR_TEXTO)
-                pantalla.blit(controles_texto, (10, ui_y + 45))
-
-                pygame.display.flip()
-                clock.tick(10)
-
-    finally:
-        # --- Salir del Juego ---
-        print("\nGuardando progreso final...")
-        agente.save()
-        pygame.quit()
-# # --- Bucle Principal del Juego ---
-# def main():
-#     pygame.init()
-#     pantalla = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-#     pygame.display.set_caption("Pacman RL - DQN Interactivo")
-#     clock = pygame.time.Clock()
-
-#     # Carga de recursos
-#     img_agente = cargar_imagen('agente.png', (60, 100, 255))
-#     img_fruta = cargar_imagen('fruta.png', (40, 200, 40))
-#     img_veneno = cargar_imagen('veneno.png', (255, 80, 80))
-#     img_pared = cargar_imagen('pared.jpg', (100, 100, 100)) # CORRECCIÓN: pared.png
-#     font = pygame.font.SysFont("Consolas", 24, bold=True)
-
-#     # Inicialización de objetos
-#     entorno = EntornoGrid()
-#     agente = AgenteDQN(state_shape=STATE_SHAPE, num_actions=ACTIONS)
-    
-#     # Variables de estado del juego
-#     modo = "SETUP" # Inicia en modo diseño
-#     cursor = [GRID_SIZE // 2, GRID_SIZE // 2]
-#     tablero_inicial = entorno.snapshot()
-#     episodio_num = 0
-#     puntuacion_total = 0
-#     running = True
-
-#     # ---- BUCLE PRINCIPAL ----
-#     while running:
-#         # --- 1. GESTIÓN DE EVENTOS ---
-#         for evento in pygame.event.get():
-#             if evento.type == pygame.QUIT or (evento.type == pygame.KEYDOWN and evento.key == pygame.K_q):
-#                 running = False
-#             if evento.type == pygame.KEYDOWN:
-#                 # Cambiar de modo
-#                 if evento.key == pygame.K_s:
-#                     modo = "SETUP"
-#                     entorno.restore(tablero_inicial)
-#                 if evento.key == pygame.K_t:
-#                     if modo != "TRAINING":
-#                         modo = "TRAINING"
-#                         entorno.restore(tablero_inicial)
-#                         entorno.reset_agent()
-#                     else:
-#                         modo = "SETUP" # Pausar entrenamiento
-#                 if evento.key == pygame.K_p:
-#                     modo = "PLAYING"
-#                     entorno.restore(tablero_inicial)
-#                     entorno.reset_agent()
-
-#                 # Controles del modo SETUP
-#                 if modo == "SETUP":
-#                     if evento.key == pygame.K_UP: cursor[1] = max(0, cursor[1] - 1)
-#                     elif evento.key == pygame.K_DOWN: cursor[1] = min(GRID_SIZE - 1, cursor[1] + 1)
-#                     elif evento.key == pygame.K_LEFT: cursor[0] = max(0, cursor[0] - 1)
-#                     elif evento.key == pygame.K_RIGHT: cursor[0] = min(GRID_SIZE - 1, cursor[0] + 1)
+                    if evento.key == pygame.K_UP: cursor[1] = max(0, cursor[1] - 1)
+                    elif evento.key == pygame.K_DOWN: cursor[1] = min(GRID_SIZE - 1, cursor[1] + 1)
+                    elif evento.key == pygame.K_LEFT: cursor[0] = max(0, cursor[0] - 1)
+                    elif evento.key == pygame.K_RIGHT: cursor[0] = min(GRID_SIZE - 1, cursor[0] + 1)
                     
-#                     pos = tuple(cursor)
-#                     if evento.key == pygame.K_f:
-#                         entorno.frutas.symmetric_difference_update({pos})
-#                         entorno.venenos.discard(pos); entorno.paredes.discard(pos)
-#                     elif evento.key == pygame.K_v:
-#                         entorno.venenos.symmetric_difference_update({pos})
-#                         entorno.frutas.discard(pos); entorno.paredes.discard(pos)
-#                     elif evento.key == pygame.K_w:
-#                         entorno.paredes.symmetric_difference_update({pos})
-#                         entorno.frutas.discard(pos); entorno.venenos.discard(pos)
-#                     elif evento.key == pygame.K_c:
-#                         entorno.reset_board()
+                    pos = tuple(cursor)
+                    if evento.key == pygame.K_f:
+                        entorno.frutas.symmetric_difference_update({pos})
+                        entorno.venenos.discard(pos); entorno.paredes.discard(pos)
+                    elif evento.key == pygame.K_v:
+                        entorno.venenos.symmetric_difference_update({pos})
+                        entorno.frutas.discard(pos); entorno.paredes.discard(pos)
+                    elif evento.key == pygame.K_w:
+                        entorno.paredes.symmetric_difference_update({pos})
+                        entorno.frutas.discard(pos); entorno.venenos.discard(pos)
+                    elif evento.key == pygame.K_c:
+                        entorno.reset_board()
                     
-#                     tablero_inicial = entorno.snapshot() # Guarda el diseño
+                    tablero_inicial = entorno.snapshot() # Guarda el diseño
 
-#         # --- 2. LÓGICA DEL JUEGO Y ENTRENAMIENTO (MODOS ACTIVOS) ---
-#         if modo in ["TRAINING", "PLAYING"]:
-#             estado_actual = entorno.get_state()
+        # --- 2. LÓGICA DEL JUEGO Y ENTRENAMIENTO (MODOS ACTIVOS) ---
+        if modo in ["TRAINING", "PLAYING"]:
+            estado_actual = entorno.get_state()
             
-#             # El agente elige la acción
-#             es_greedy = (modo == "PLAYING") # En modo "PLAYING", no explora
-#             accion = agente.elegir_accion(estado_actual, greedy=es_greedy)
+            # El agente elige la acción
+            es_greedy = (modo == "PLAYING") # En modo "PLAYING", no explora
+            accion = agente.elegir_accion(estado_actual, greedy=es_greedy)
             
-#             # El entorno ejecuta la acción
-#             sig_estado, recompensa, terminado = entorno.paso(accion)
-#             puntuacion_total += recompensa
+            # El entorno ejecuta la acción
+            sig_estado, recompensa, terminado = entorno.paso(accion)
+            puntuacion_total += recompensa
             
-#             # Si está entrenando, almacena la experiencia y aprende
-#             if modo == "TRAINING":
-#                 agente.almacenar(estado_actual, accion, recompensa, sig_estado, terminado)
-#                 agente.optimizar()
+            # Si está entrenando, almacena la experiencia y aprende
+            if modo == "TRAINING":
+                agente.almacenar(estado_actual, accion, recompensa, sig_estado, terminado)
+                agente.optimizar()
             
-#             # Si el episodio termina, se reinicia para el siguiente
-#             if terminado:
-#                 print(f"Episodio {episodio_num} terminado. Puntuación: {puntuacion_total:.2f}. Epsilon: {agente.epsilon:.3f}")
-#                 entorno.restore(tablero_inicial)
-#                 entorno.reset_agent()
-#                 puntuacion_total = 0
-#                 episodio_num += 1
+            # Si el episodio termina, se reinicia para el siguiente
+            if terminado:
+                print(f"Episodio {episodio_num} terminado. Puntuación: {puntuacion_total:.2f}. Epsilon: {agente.epsilon:.3f}")
+                entorno.restore(tablero_inicial)
+                entorno.reset_agent()
+                puntuacion_total = 0
+                episodio_num += 1
                 
-#                 if modo == "TRAINING":
-#                     agente.decaer_epsilon()
-#                     if episodio_num % TARGET_UPDATE == 0:
-#                         agente.update_target()
-#                         agente.save() # Guarda el progreso
+                if modo == "TRAINING":
+                    agente.decaer_epsilon()
+                    if episodio_num % TARGET_UPDATE == 0:
+                        agente.update_target()
+                        agente.save() # Guarda el progreso
 
-#         # --- 3. RENDERIZADO (DIBUJAR EN PANTALLA) ---
-#         pantalla.fill(COLOR_FONDO)
-#         for x in range(GRID_SIZE):
-#             for y in range(GRID_SIZE):
-#                 pygame.draw.rect(pantalla, COLOR_LINEAS, (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE), 1)
+        # --- 3. RENDERIZADO (DIBUJAR EN PANTALLA) ---
+        pantalla.fill(COLOR_FONDO)
+        for x in range(GRID_SIZE):
+            for y in range(GRID_SIZE):
+                pygame.draw.rect(pantalla, COLOR_LINEAS, (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE), 1)
 
-#         for x, y in entorno.frutas:  pantalla.blit(img_fruta,  (x * CELL_SIZE, y * CELL_SIZE))
-#         for x, y in entorno.venenos: pantalla.blit(img_veneno, (x * CELL_SIZE, y * CELL_SIZE))
-#         for x, y in entorno.paredes: pantalla.blit(img_pared,  (x * CELL_SIZE, y * CELL_SIZE))
+        for x, y in entorno.frutas:  pantalla.blit(img_fruta,  (x * CELL_SIZE, y * CELL_SIZE))
+        for x, y in entorno.venenos: pantalla.blit(img_veneno, (x * CELL_SIZE, y * CELL_SIZE))
+        for x, y in entorno.paredes: pantalla.blit(img_pared,  (x * CELL_SIZE, y * CELL_SIZE))
         
-#         # Dibuja el agente solo si no está en modo SETUP
-#         if modo != "SETUP":
-#             pantalla.blit(img_agente, (entorno.agent[0] * CELL_SIZE, entorno.agent[1] * CELL_SIZE))
+        # Dibuja el agente solo si no está en modo SETUP
+        if modo != "SETUP":
+            pantalla.blit(img_agente, (entorno.agent[0] * CELL_SIZE, entorno.agent[1] * CELL_SIZE))
 
-#         # Dibuja el cursor en modo SETUP
-#         if modo == "SETUP":
-#             pygame.draw.rect(pantalla, COLOR_CURSOR, (cursor[0] * CELL_SIZE, cursor[1] * CELL_SIZE, CELL_SIZE, CELL_SIZE), 4)
+        # Dibuja el cursor en modo SETUP
+        if modo == "SETUP":
+            pygame.draw.rect(pantalla, COLOR_CURSOR, (cursor[0] * CELL_SIZE, cursor[1] * CELL_SIZE, CELL_SIZE, CELL_SIZE), 4)
 
-#         # --- DIBUJAR UI (INFORMACIÓN Y CONTROLES) ---
-#         ui_y = GRID_SIZE * CELL_SIZE
-#         pygame.draw.rect(pantalla, (40,40,40), (0, ui_y, SCREEN_WIDTH, 80))
+        # --- DIBUJAR UI (INFORMACIÓN Y CONTROLES) ---
+        ui_y = GRID_SIZE * CELL_SIZE
+        pygame.draw.rect(pantalla, (40,40,40), (0, ui_y, SCREEN_WIDTH, 80))
         
-#         modo_texto = font.render(f"MODO: {modo}", True, COLOR_INFO)
-#         pantalla.blit(modo_texto, (10, ui_y + 10))
+        modo_texto = font.render(f"MODO: {modo}", True, COLOR_INFO)
+        pantalla.blit(modo_texto, (10, ui_y + 10))
 
-#         if modo == "TRAINING":
-#             eps_texto = font.render(f"Epsilon: {agente.epsilon:.2f}", True, COLOR_TEXTO)
-#             pantalla.blit(eps_texto, (200, ui_y + 10))
+        if modo == "TRAINING":
+            eps_texto = font.render(f"Epsilon: {agente.epsilon:.2f}", True, COLOR_TEXTO)
+            pantalla.blit(eps_texto, (200, ui_y + 10))
         
-#         episodio_texto = font.render(f"Episodio: {episodio_num}", True, COLOR_TEXTO)
-#         pantalla.blit(episodio_texto, (450, ui_y + 10))
+        episodio_texto = font.render(f"Episodio: {episodio_num}", True, COLOR_TEXTO)
+        pantalla.blit(episodio_texto, (450, ui_y + 10))
         
-#         controles_texto = font.render("S:Setup T:Entrenar P:Jugar Q:Salir", True, COLOR_TEXTO)
-#         pantalla.blit(controles_texto, (10, ui_y + 45))
+        controles_texto = font.render("S:Setup T:Entrenar P:Jugar Q:Salir", True, COLOR_TEXTO)
+        pantalla.blit(controles_texto, (10, ui_y + 45))
 
-#         pygame.display.flip()
+        pygame.display.flip()
         
-#         # Controlar la velocidad de la simulación
-#         clock.tick(10) # 10 pasos por segundo
+        # Controlar la velocidad de la simulación
+        clock.tick(10) # 10 pasos por segundo
 
-#     # --- Salir del Juego ---
-#     agente.save() # Guarda el último progreso al salir
-#     pygame.quit()
+    # --- Salir del Juego ---
+    agente.save() # Guarda el último progreso al salir
+    pygame.quit()
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Pac‑Man RL (DQN) – Modo visual o headless")
+    parser.add_argument("--headless", action="store_true",
+                        help="Entrena sin interfaz gráfica")
+    parser.add_argument("--episodios", type=int, default=5000,
+                        help="Número de episodios para el entrenamiento headless")
+    parser.add_argument("--fps", type=int, default=10,
+                        help="Frames por segundo en modo visual")
+
+    args = parser.parse_args()
+
+    if args.headless:
+        entrenamiento_headless(episodios=args.episodios)
+    else:
+        # main_visual acepta opcionalmente la velocidad deseada
+        main(fps=args.fps)             # <- cambia tu 'main' original a 'main(fps=10)'
